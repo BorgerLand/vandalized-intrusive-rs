@@ -124,7 +124,7 @@
 //! a.push_front(test.clone());
 //! b.push_front(test.clone());
 //! c.push_front(test.clone());
-//! d.insert(test);
+//! d.insert(|a, b| a < b, test);
 //! ```
 //!
 //! # Cursors
@@ -166,7 +166,7 @@
 //!
 //! fn remove_range(tree: &mut RBTree<ElementAdapter>, min: i32, max: i32) {
 //!     // Find the first element which is greater than or equal to min
-//!     let mut cursor = tree.lower_bound_mut(Bound::Included(&min));
+//!     let mut cursor = tree.lower_bound_mut(|a, b| a < b, Bound::Included(&min));
 //!
 //!     // Iterate over all elements in the range [min, max]
 //!     while cursor.get().map_or(false, |e| e.value <= max) {

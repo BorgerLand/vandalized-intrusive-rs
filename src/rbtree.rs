@@ -10,7 +10,6 @@
 
 use core::borrow::Borrow;
 use core::cell::Cell;
-use core::cmp::Ordering;
 use core::fmt;
 use core::mem;
 use core::ptr::NonNull;
@@ -1431,20 +1430,26 @@ where
     /// Inserts a new element into the `RBTree`.
     ///
     /// The new element will be inserted at the correct position in the tree
-    /// based on its key, regardless of the current cursor position.
+    /// based on the supplied comparator, regardless of the current cursor
+    /// position.
+    ///
+    /// `less_than` is a comparator over keys that mirrors a C++ `std::multiset`
+    /// comparison object: `less_than(a, b)` must return `true` if and only if
+    /// key `a` should be ordered strictly before key `b`.
     ///
     /// # Panics
     ///
     /// Panics if the new element is already linked to a different intrusive
     /// collection.
     #[inline]
-    pub fn insert<'c>(&'c mut self, val: <A::PointerOps as PointerOps>::Pointer)
-    where
-        <A as KeyAdapter<'c>>::Key: Ord,
-    {
+    pub fn insert<'c>(
+        &'c mut self,
+        less_than: impl Fn(&<A as KeyAdapter<'c>>::Key, &<A as KeyAdapter<'c>>::Key) -> bool,
+        val: <A::PointerOps as PointerOps>::Pointer,
+    ) {
         // We explicitly drop the returned CursorMut here, otherwise we would
         // end up with multiple CursorMut in the same collection.
-        self.tree.insert(val);
+        self.tree.insert(less_than, val);
     }
 }
 
@@ -1799,8 +1804,9 @@ where
     <A as Adapter>::LinkOps: RBTreeOps,
 {
     #[inline]
-    fn find_internal<'a, Q: ?Sized + Ord>(
+    fn find_internal<'a, Q: ?Sized>(
         &self,
+        less_than: impl Fn(&Q, &Q) -> bool,
         key: &Q,
     ) -> Option<<A::LinkOps as link_ops::LinkOps>::LinkPtr>
     where
@@ -1812,10 +1818,17 @@ where
         let mut tree = self.root;
         while let Some(x) = tree {
             let current = unsafe { &*self.adapter.get_value(x) };
-            match key.cmp(self.adapter.get_key(current).borrow()) {
-                Ordering::Less => tree = unsafe { link_ops.left(x) },
-                Ordering::Equal => return tree,
-                Ordering::Greater => tree = unsafe { link_ops.right(x) },
+            let current_key = self.adapter.get_key(current);
+            let current_key = current_key.borrow();
+            if less_than(key, current_key) {
+                // key < current_key
+                tree = unsafe { link_ops.left(x) };
+            } else if less_than(current_key, key) {
+                // key > current_key
+                tree = unsafe { link_ops.right(x) };
+            } else {
+                // key == current_key
+                return tree;
             }
         }
         None
@@ -1824,16 +1837,23 @@ where
     /// Returns a `Cursor` pointing to an element with the given key. If no such
     /// element is found then a null cursor is returned.
     ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
+    ///
     /// If multiple elements with an identical key are found then an arbitrary
     /// one is returned.
     #[inline]
-    pub fn find<'a, 'b, Q: ?Sized + Ord>(&'a self, key: &Q) -> Cursor<'a, A>
+    pub fn find<'a, 'b, Q: ?Sized>(
+        &'a self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        key: &Q,
+    ) -> Cursor<'a, A>
     where
         <A as KeyAdapter<'b>>::Key: Borrow<Q>,
         'a: 'b,
     {
         Cursor {
-            current: self.find_internal(key),
+            current: self.find_internal(less_than, key),
             tree: self,
         }
     }
@@ -1841,16 +1861,23 @@ where
     /// Returns a `CursorMut` pointing to an element with the given key. If no
     /// such element is found then a null cursor is returned.
     ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
+    ///
     /// If multiple elements with an identical key are found then an arbitrary
     /// one is returned.
     #[inline]
-    pub fn find_mut<'a, 'b, Q: ?Sized + Ord>(&'a mut self, key: &Q) -> CursorMut<'a, A>
+    pub fn find_mut<'a, 'b, Q: ?Sized>(
+        &'a mut self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        key: &Q,
+    ) -> CursorMut<'a, A>
     where
         <A as KeyAdapter<'b>>::Key: Borrow<Q>,
         'a: 'b,
     {
         CursorMut {
-            current: self.find_internal(key),
+            current: self.find_internal(less_than, key),
             tree: self,
         }
     }
@@ -1858,23 +1885,31 @@ where
     // Returns a `CursorOwning` pointing to an element with the given key. If no
     /// such element is found then a null cursor is returned.
     ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
+    ///
     /// If multiple elements with an identical key are found then an arbitrary
     /// one is returned.
     #[inline]
-    pub fn find_owning<'a, Q: ?Sized + Ord>(self, key: &Q) -> CursorOwning<A>
+    pub fn find_owning<'a, Q: ?Sized>(
+        self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        key: &Q,
+    ) -> CursorOwning<A>
     where
         <A as KeyAdapter<'a>>::Key: Borrow<Q>,
         Self: 'a,
     {
         CursorOwning {
-            current: self.find_internal(key),
+            current: self.find_internal(less_than, key),
             tree: self,
         }
     }
 
     #[inline]
-    fn lower_bound_internal<'a, Q: ?Sized + Ord>(
+    fn lower_bound_internal<'a, Q: ?Sized>(
         &self,
+        less_than: impl Fn(&Q, &Q) -> bool,
         bound: Bound<&Q>,
     ) -> Option<<A::LinkOps as link_ops::LinkOps>::LinkPtr>
     where
@@ -1887,10 +1922,14 @@ where
         let mut result = None;
         while let Some(x) = tree {
             let current = unsafe { &*self.adapter.get_value(x) };
+            let current_key = self.adapter.get_key(current);
+            let current_key = current_key.borrow();
             let cond = match bound {
                 Unbounded => true,
-                Included(key) => key <= self.adapter.get_key(current).borrow(),
-                Excluded(key) => key < self.adapter.get_key(current).borrow(),
+                // key <= current_key  <=>  !(current_key < key)
+                Included(key) => !less_than(current_key, key),
+                // key < current_key
+                Excluded(key) => less_than(key, current_key),
             };
             if cond {
                 result = tree;
@@ -1905,14 +1944,21 @@ where
     /// Returns a `Cursor` pointing to the lowest element whose key is above
     /// the given bound. If no such element is found then a null cursor is
     /// returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn lower_bound<'a, 'b, Q: ?Sized + Ord>(&'a self, bound: Bound<&Q>) -> Cursor<'a, A>
+    pub fn lower_bound<'a, 'b, Q: ?Sized>(
+        &'a self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        bound: Bound<&Q>,
+    ) -> Cursor<'a, A>
     where
         <A as KeyAdapter<'b>>::Key: Borrow<Q>,
         'a: 'b,
     {
         Cursor {
-            current: self.lower_bound_internal(bound),
+            current: self.lower_bound_internal(less_than, bound),
             tree: self,
         }
     }
@@ -1920,9 +1966,13 @@ where
     /// Returns a `CursorMut` pointing to the first element whose key is
     /// above the given bound. If no such element is found then a null
     /// cursor is returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn lower_bound_mut<'a, 'b, Q: ?Sized + Ord>(
+    pub fn lower_bound_mut<'a, 'b, Q: ?Sized>(
         &'a mut self,
+        less_than: impl Fn(&Q, &Q) -> bool,
         bound: Bound<&Q>,
     ) -> CursorMut<'a, A>
     where
@@ -1930,7 +1980,7 @@ where
         'a: 'b,
     {
         CursorMut {
-            current: self.lower_bound_internal(bound),
+            current: self.lower_bound_internal(less_than, bound),
             tree: self,
         }
     }
@@ -1938,21 +1988,29 @@ where
     /// Returns a `CursorOwning` pointing to the first element whose key is
     /// above the given bound. If no such element is found then a null
     /// cursor is returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn lower_bound_owning<'a, Q: ?Sized + Ord>(self, bound: Bound<&Q>) -> CursorOwning<A>
+    pub fn lower_bound_owning<'a, Q: ?Sized>(
+        self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        bound: Bound<&Q>,
+    ) -> CursorOwning<A>
     where
         <A as KeyAdapter<'a>>::Key: Borrow<Q>,
         Self: 'a,
     {
         CursorOwning {
-            current: self.lower_bound_internal(bound),
+            current: self.lower_bound_internal(less_than, bound),
             tree: self,
         }
     }
 
     #[inline]
-    fn upper_bound_internal<'a, Q: ?Sized + Ord>(
+    fn upper_bound_internal<'a, Q: ?Sized>(
         &self,
+        less_than: impl Fn(&Q, &Q) -> bool,
         bound: Bound<&Q>,
     ) -> Option<<A::LinkOps as link_ops::LinkOps>::LinkPtr>
     where
@@ -1965,10 +2023,14 @@ where
         let mut result = None;
         while let Some(x) = tree {
             let current = unsafe { &*self.adapter.get_value(x) };
+            let current_key = self.adapter.get_key(current);
+            let current_key = current_key.borrow();
             let cond = match bound {
                 Unbounded => false,
-                Included(key) => key < self.adapter.get_key(current).borrow(),
-                Excluded(key) => key <= self.adapter.get_key(current).borrow(),
+                // key < current_key
+                Included(key) => less_than(key, current_key),
+                // key <= current_key  <=>  !(current_key < key)
+                Excluded(key) => !less_than(current_key, key),
             };
             if cond {
                 tree = unsafe { link_ops.left(x) };
@@ -1983,14 +2045,21 @@ where
     /// Returns a `Cursor` pointing to the last element whose key is below
     /// the given bound. If no such element is found then a null cursor is
     /// returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn upper_bound<'a, 'b, Q: ?Sized + Ord>(&'a self, bound: Bound<&Q>) -> Cursor<'a, A>
+    pub fn upper_bound<'a, 'b, Q: ?Sized>(
+        &'a self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        bound: Bound<&Q>,
+    ) -> Cursor<'a, A>
     where
         <A as KeyAdapter<'b>>::Key: Borrow<Q>,
         'a: 'b,
     {
         Cursor {
-            current: self.upper_bound_internal(bound),
+            current: self.upper_bound_internal(less_than, bound),
             tree: self,
         }
     }
@@ -1998,9 +2067,13 @@ where
     /// Returns a `CursorMut` pointing to the last element whose key is
     /// below the given bound. If no such element is found then a null
     /// cursor is returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn upper_bound_mut<'a, 'b, Q: ?Sized + Ord>(
+    pub fn upper_bound_mut<'a, 'b, Q: ?Sized>(
         &'a mut self,
+        less_than: impl Fn(&Q, &Q) -> bool,
         bound: Bound<&Q>,
     ) -> CursorMut<'a, A>
     where
@@ -2008,7 +2081,7 @@ where
         'a: 'b,
     {
         CursorMut {
-            current: self.upper_bound_internal(bound),
+            current: self.upper_bound_internal(less_than, bound),
             tree: self,
         }
     }
@@ -2016,14 +2089,21 @@ where
     /// Returns a `CursorOwning` pointing to the last element whose key is
     /// below the given bound. If no such element is found then a null
     /// cursor is returned.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
     #[inline]
-    pub fn upper_bound_owning<'a, Q: ?Sized + Ord>(self, bound: Bound<&Q>) -> CursorOwning<A>
+    pub fn upper_bound_owning<'a, Q: ?Sized>(
+        self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        bound: Bound<&Q>,
+    ) -> CursorOwning<A>
     where
         <A as KeyAdapter<'a>>::Key: Borrow<Q>,
         Self: 'a,
     {
         CursorOwning {
-            current: self.upper_bound_internal(bound),
+            current: self.upper_bound_internal(less_than, bound),
             tree: self,
         }
     }
@@ -2031,7 +2111,14 @@ where
     /// Inserts a new element into the `RBTree`.
     ///
     /// The new element will be inserted at the correct position in the tree
-    /// based on its key.
+    /// based on the supplied comparator.
+    ///
+    /// `less_than` mirrors a C++ `std::multiset` comparison object:
+    /// `less_than(a, b)` must return `true` if and only if key `a` should be
+    /// ordered strictly before key `b`. Note that, exactly like a C++
+    /// `multiset`, this means the comparator is supplied per-call and is not
+    /// enforced to be identical across insertions; the caller is responsible
+    /// for keeping the tree consistently ordered.
     ///
     /// Returns a mutable cursor pointing to the newly added element.
     ///
@@ -2040,10 +2127,11 @@ where
     /// Panics if the new element is already linked to a different intrusive
     /// collection.
     #[inline]
-    pub fn insert<'a>(&'a mut self, val: <A::PointerOps as PointerOps>::Pointer) -> CursorMut<'a, A>
-    where
-        <A as KeyAdapter<'a>>::Key: Ord,
-    {
+    pub fn insert<'a>(
+        &'a mut self,
+        less_than: impl Fn(&<A as KeyAdapter<'a>>::Key, &<A as KeyAdapter<'a>>::Key) -> bool,
+        val: <A::PointerOps as PointerOps>::Pointer,
+    ) -> CursorMut<'a, A> {
         unsafe {
             let new = self.node_from_value(val);
             let raw = self.adapter.get_value(new);
@@ -2052,7 +2140,7 @@ where
                 let mut tree = root;
                 loop {
                     let current = &*self.adapter.get_value(tree);
-                    if key < self.adapter.get_key(current) {
+                    if less_than(&key, &self.adapter.get_key(current)) {
                         if let Some(left) = self.adapter.link_ops().left(tree) {
                             tree = left;
                         } else {
@@ -2087,10 +2175,17 @@ where
     /// the tree does not have to be searched a second time to find a place to
     /// insert the new element.
     ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
+    ///
     /// If multiple elements with an identical key are found then an arbitrary
     /// one is returned.
     #[inline]
-    pub fn entry<'a, Q: ?Sized + Ord>(&'a mut self, key: &Q) -> Entry<'a, A>
+    pub fn entry<'a, Q: ?Sized>(
+        &'a mut self,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        key: &Q,
+    ) -> Entry<'a, A>
     where
         <A as KeyAdapter<'a>>::Key: Borrow<Q>,
     {
@@ -2099,35 +2194,36 @@ where
                 let mut tree = root;
                 loop {
                     let current = &*self.adapter.get_value(tree);
-                    match key.cmp(self.adapter.get_key(current).borrow()) {
-                        Ordering::Less => {
-                            if let Some(left) = self.adapter.link_ops().left(tree) {
-                                tree = left;
-                            } else {
-                                return Entry::Vacant(InsertCursor {
-                                    parent: Some(tree),
-                                    insert_left: true,
-                                    tree: self,
-                                });
-                            }
-                        }
-                        Ordering::Equal => {
-                            return Entry::Occupied(CursorMut {
-                                current: Some(tree),
+                    let current_key = self.adapter.get_key(current);
+                    let current_key = current_key.borrow();
+                    if less_than(key, current_key) {
+                        // key < current_key
+                        if let Some(left) = self.adapter.link_ops().left(tree) {
+                            tree = left;
+                        } else {
+                            return Entry::Vacant(InsertCursor {
+                                parent: Some(tree),
+                                insert_left: true,
                                 tree: self,
                             });
                         }
-                        Ordering::Greater => {
-                            if let Some(right) = self.adapter.link_ops().right(tree) {
-                                tree = right;
-                            } else {
-                                return Entry::Vacant(InsertCursor {
-                                    parent: Some(tree),
-                                    insert_left: false,
-                                    tree: self,
-                                });
-                            }
+                    } else if less_than(current_key, key) {
+                        // key > current_key
+                        if let Some(right) = self.adapter.link_ops().right(tree) {
+                            tree = right;
+                        } else {
+                            return Entry::Vacant(InsertCursor {
+                                parent: Some(tree),
+                                insert_left: false,
+                                tree: self,
+                            });
                         }
+                    } else {
+                        // key == current_key
+                        return Entry::Occupied(CursorMut {
+                            current: Some(tree),
+                            tree: self,
+                        });
                     }
                 }
             } else {
@@ -2144,24 +2240,32 @@ where
     /// tree, starting at min, and ending at max. If min is `Unbounded`, then it
     /// will be treated as "negative infinity", and if max is `Unbounded`, then
     /// it will be treated as "positive infinity". Thus
-    /// `range(Unbounded, Unbounded)` will yield the whole collection.
+    /// `range(less_than, Unbounded, Unbounded)` will yield the whole collection.
+    ///
+    /// `less_than(a, b)` must return `true` if and only if key `a` is ordered
+    /// strictly before key `b`; it replaces the `Ord` requirement on the key.
+    /// Note that both bounds are compared with the same comparator, so they
+    /// must share the same borrowed key type `Q`.
     #[inline]
-    pub fn range<'a, Min: ?Sized + Ord, Max: ?Sized + Ord>(
+    pub fn range<'a, Q: ?Sized>(
         &'a self,
-        min: Bound<&Min>,
-        max: Bound<&Max>,
+        less_than: impl Fn(&Q, &Q) -> bool,
+        min: Bound<&Q>,
+        max: Bound<&Q>,
     ) -> Iter<'a, A>
     where
-        <A as KeyAdapter<'a>>::Key: Borrow<Min> + Borrow<Max>,
-        <A as KeyAdapter<'a>>::Key: Ord,
+        <A as KeyAdapter<'a>>::Key: Borrow<Q>,
     {
-        let lower = self.lower_bound_internal(min);
-        let upper = self.upper_bound_internal(max);
+        // `&F` also implements `Fn(..)` when `F: Fn(..)`, so we can reuse the
+        // same comparator for both bound searches and the final check.
+        let lower = self.lower_bound_internal(&less_than, min);
+        let upper = self.upper_bound_internal(&less_than, max);
 
         if let (Some(lower), Some(upper)) = (lower, upper) {
             let lower_key = unsafe { self.adapter.get_key(&*self.adapter.get_value(lower)) };
             let upper_key = unsafe { self.adapter.get_key(&*self.adapter.get_value(upper)) };
-            if upper_key >= lower_key {
+            // upper_key >= lower_key  <=>  !(upper_key < lower_key)
+            if !less_than(upper_key.borrow(), lower_key.borrow()) {
                 return Iter {
                     head: Some(lower),
                     tail: Some(upper),
@@ -2527,6 +2631,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Ascending comparator used to drive the RBTree's `less_than` callbacks
+    // (the old `Ord`-based ordering). `less_than(a, b)` is true iff a < b.
+    fn lt<T: Ord + ?Sized>(a: &T, b: &T) -> bool {
+        a < b
+    }
+
     use super::{CursorOwning, Entry, KeyAdapter, Link, PointerOps, RBTree};
     use crate::{Bound::*, UnsafeRef};
     use alloc::boxed::Box;
@@ -2585,7 +2695,7 @@ mod tests {
         let mut b = RBTree::<RcObjAdapter>::default();
         assert!(b.is_empty());
 
-        assert_eq!(b.insert(a.clone()).get().unwrap().value, 1);
+        assert_eq!(b.insert(lt, a.clone()).get().unwrap().value, 1);
         assert!(!b.is_empty());
         assert!(a.link.is_linked());
         assert_eq!(format!("{:?}", a.link), "linked");
@@ -2620,7 +2730,7 @@ mod tests {
         cur.insert_before(a.clone());
         cur.insert_before(c.clone());
         cur.move_prev();
-        cur.insert(b.clone());
+        cur.insert(lt, b.clone());
         assert!(cur.peek_next().is_null());
         cur.move_next();
         assert!(cur.is_null());
@@ -2683,10 +2793,10 @@ mod tests {
         }
 
         let mut t = RBTree::new(RcObjAdapter::new());
-        t.insert(make_rc_obj(1));
-        t.insert(make_rc_obj(2));
-        t.insert(make_rc_obj(3));
-        t.insert(make_rc_obj(4));
+        t.insert(lt, make_rc_obj(1));
+        t.insert(lt, make_rc_obj(2));
+        t.insert(lt, make_rc_obj(3));
+        t.insert(lt, make_rc_obj(4));
         let mut con = Container {
             cur: t.cursor_owning(),
         };
@@ -2698,7 +2808,7 @@ mod tests {
         con.cur = con.cur.into_inner().back_owning();
         assert_eq!(con.cur.as_cursor().get().unwrap().value, 4);
 
-        con.cur = con.cur.into_inner().find_owning(&2);
+        con.cur = con.cur.into_inner().find_owning(lt, &2);
         assert_eq!(con.cur.as_cursor().get().unwrap().value, 2);
 
         con.cur.with_cursor_mut(|c| c.move_next());
@@ -2717,7 +2827,7 @@ mod tests {
         {
             let mut expected = Vec::new();
             for x in v.iter() {
-                t.insert(x.clone());
+                t.insert(lt, x.clone());
                 expected.push(x.value);
                 assert_eq!(t.iter().map(|x| x.value).collect::<Vec<_>>(), expected);
             }
@@ -2733,7 +2843,7 @@ mod tests {
         {
             let mut expected = Vec::new();
             for x in v.iter().rev() {
-                t.insert(x.clone());
+                t.insert(lt, x.clone());
                 expected.insert(0, x.value);
                 assert_eq!(t.iter().map(|x| x.value).collect::<Vec<_>>(), expected);
             }
@@ -2751,7 +2861,7 @@ mod tests {
             indices.shuffle(&mut rng);
             let mut expected = Vec::new();
             for i in indices {
-                t.insert(v[i].clone());
+                t.insert(lt, v[i].clone());
                 expected.push(v[i].value);
                 expected[..].sort_unstable();
                 assert_eq!(t.iter().map(|x| x.value).collect::<Vec<_>>(), expected);
@@ -2830,7 +2940,7 @@ mod tests {
         let v = (0..10).map(|x| make_rc_obj(x * 10)).collect::<Vec<_>>();
         let mut t = RBTree::new(RcObjAdapter::new());
         for x in v.iter() {
-            t.insert(x.clone());
+            t.insert(lt, x.clone());
         }
 
         assert_eq!(
@@ -2847,205 +2957,205 @@ mod tests {
             vec![90, 80, 70, 60, 50, 40, 30, 20, 10, 0]
         );
         assert_eq!(
-            t.range(Unbounded, Unbounded)
+            t.range(lt, Unbounded, Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
         );
 
         assert_eq!(
-            t.range(Included(&0), Unbounded)
+            t.range(lt, Included(&0), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
         );
         assert_eq!(
-            t.range(Excluded(&0), Unbounded)
+            t.range(lt, Excluded(&0), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![10, 20, 30, 40, 50, 60, 70, 80, 90]
         );
         assert_eq!(
-            t.range(Included(&25), Unbounded)
+            t.range(lt, Included(&25), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70, 80, 90]
         );
         assert_eq!(
-            t.range(Excluded(&25), Unbounded)
+            t.range(lt, Excluded(&25), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70, 80, 90]
         );
         assert_eq!(
-            t.range(Included(&70), Unbounded)
+            t.range(lt, Included(&70), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![70, 80, 90]
         );
         assert_eq!(
-            t.range(Excluded(&70), Unbounded)
+            t.range(lt, Excluded(&70), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![80, 90]
         );
         assert_eq!(
-            t.range(Included(&100), Unbounded)
+            t.range(lt, Included(&100), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&100), Unbounded)
+            t.range(lt, Excluded(&100), Unbounded)
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
 
         assert_eq!(
-            t.range(Unbounded, Included(&90))
+            t.range(lt, Unbounded, Included(&90))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
         );
         assert_eq!(
-            t.range(Unbounded, Excluded(&90))
+            t.range(lt, Unbounded, Excluded(&90))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60, 70, 80]
         );
         assert_eq!(
-            t.range(Unbounded, Included(&25))
+            t.range(lt, Unbounded, Included(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
         );
         assert_eq!(
-            t.range(Unbounded, Excluded(&25))
+            t.range(lt, Unbounded, Excluded(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
         );
         assert_eq!(
-            t.range(Unbounded, Included(&70))
+            t.range(lt, Unbounded, Included(&70))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60, 70]
         );
         assert_eq!(
-            t.range(Unbounded, Excluded(&70))
+            t.range(lt, Unbounded, Excluded(&70))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40, 50, 60]
         );
         assert_eq!(
-            t.range(Unbounded, Included(&-1))
+            t.range(lt, Unbounded, Included(&-1))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Unbounded, Excluded(&-1))
+            t.range(lt, Unbounded, Excluded(&-1))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
 
         assert_eq!(
-            t.range(Included(&25), Included(&80))
+            t.range(lt, Included(&25), Included(&80))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70, 80]
         );
         assert_eq!(
-            t.range(Included(&25), Excluded(&80))
+            t.range(lt, Included(&25), Excluded(&80))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70]
         );
         assert_eq!(
-            t.range(Excluded(&25), Included(&80))
+            t.range(lt, Excluded(&25), Included(&80))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70, 80]
         );
         assert_eq!(
-            t.range(Excluded(&25), Excluded(&80))
+            t.range(lt, Excluded(&25), Excluded(&80))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![30, 40, 50, 60, 70]
         );
 
         assert_eq!(
-            t.range(Included(&25), Included(&25))
+            t.range(lt, Included(&25), Included(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Included(&25), Excluded(&25))
+            t.range(lt, Included(&25), Excluded(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&25), Included(&25))
+            t.range(lt, Excluded(&25), Included(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&25), Excluded(&25))
+            t.range(lt, Excluded(&25), Excluded(&25))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
 
         assert_eq!(
-            t.range(Included(&50), Included(&50))
+            t.range(lt, Included(&50), Included(&50))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![50]
         );
         assert_eq!(
-            t.range(Included(&50), Excluded(&50))
+            t.range(lt, Included(&50), Excluded(&50))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&50), Included(&50))
+            t.range(lt, Excluded(&50), Included(&50))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&50), Excluded(&50))
+            t.range(lt, Excluded(&50), Excluded(&50))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
 
         assert_eq!(
-            t.range(Included(&100), Included(&-2))
+            t.range(lt, Included(&100), Included(&-2))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Included(&100), Excluded(&-2))
+            t.range(lt, Included(&100), Excluded(&-2))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&100), Included(&-2))
+            t.range(lt, Excluded(&100), Included(&-2))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
         );
         assert_eq!(
-            t.range(Excluded(&100), Excluded(&-2))
+            t.range(lt, Excluded(&100), Excluded(&-2))
                 .map(|x| x.value)
                 .collect::<Vec<_>>(),
             vec![]
@@ -3062,7 +3172,7 @@ mod tests {
         }
 
         for x in v.iter() {
-            t.insert(x.clone());
+            t.insert(lt, x.clone());
         }
         v2.clear();
         for x in t.into_iter().rev() {
@@ -3076,7 +3186,7 @@ mod tests {
         let v = (0..10).map(|x| make_rc_obj(x * 10)).collect::<Vec<_>>();
         let mut t = RBTree::new(RcObjAdapter::new());
         for x in v.iter() {
-            t.insert(x.clone());
+            t.insert(lt, x.clone());
         }
 
         for i in -9..100 {
@@ -3088,43 +3198,43 @@ mod tests {
                 }
             }
             {
-                let c = t.find(&i);
+                let c = t.find(lt, &i);
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i % 10 == 0 { Some(i) } else { None }
                 );
             }
             {
-                let c = t.find_mut(&i);
+                let c = t.find_mut(lt, &i);
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i % 10 == 0 { Some(i) } else { None }
                 );
             }
             {
-                let c = t.upper_bound(Unbounded);
+                let c = t.upper_bound(lt, Unbounded);
                 assert_eq!(c.get().map(|x| x.value), Some(90));
             }
             {
-                let c = t.upper_bound_mut(Unbounded);
+                let c = t.upper_bound_mut(lt, Unbounded);
                 assert_eq!(c.get().map(|x| x.value), Some(90));
             }
             {
-                let c = t.upper_bound(Included(&i));
+                let c = t.upper_bound(lt, Included(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i >= 0 { Some(i - mod10(i)) } else { None }
                 );
             }
             {
-                let c = t.upper_bound_mut(Included(&i));
+                let c = t.upper_bound_mut(lt, Included(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i >= 0 { Some(i - mod10(i)) } else { None }
                 );
             }
             {
-                let c = t.upper_bound(Excluded(&i));
+                let c = t.upper_bound(lt, Excluded(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i > 0 {
@@ -3135,7 +3245,7 @@ mod tests {
                 );
             }
             {
-                let c = t.upper_bound_mut(Excluded(&i));
+                let c = t.upper_bound_mut(lt, Excluded(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i > 0 {
@@ -3146,15 +3256,15 @@ mod tests {
                 );
             }
             {
-                let c = t.lower_bound(Unbounded);
+                let c = t.lower_bound(lt, Unbounded);
                 assert_eq!(c.get().map(|x| x.value), Some(0));
             }
             {
-                let c = t.lower_bound_mut(Unbounded);
+                let c = t.lower_bound_mut(lt, Unbounded);
                 assert_eq!(c.get().map(|x| x.value), Some(0));
             }
             {
-                let c = t.lower_bound(Included(&i));
+                let c = t.lower_bound(lt, Included(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i <= 90 {
@@ -3165,7 +3275,7 @@ mod tests {
                 );
             }
             {
-                let c = t.lower_bound_mut(Included(&i));
+                let c = t.lower_bound_mut(lt, Included(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i <= 90 {
@@ -3176,7 +3286,7 @@ mod tests {
                 );
             }
             {
-                let c = t.lower_bound(Excluded(&i));
+                let c = t.lower_bound(lt, Excluded(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i < 90 {
@@ -3187,7 +3297,7 @@ mod tests {
                 );
             }
             {
-                let c = t.lower_bound_mut(Excluded(&i));
+                let c = t.lower_bound_mut(lt, Excluded(&i));
                 assert_eq!(
                     c.get().map(|x| x.value),
                     if i < 90 {
@@ -3206,9 +3316,9 @@ mod tests {
         let a = UnsafeRef::from_box(Box::new(make_obj(1)));
         let b = UnsafeRef::from_box(Box::new(make_obj(2)));
         let c = UnsafeRef::from_box(Box::new(make_obj(3)));
-        t.insert(a.clone());
-        t.insert(b.clone());
-        t.insert(c.clone());
+        t.insert(lt, a.clone());
+        t.insert(lt, b.clone());
+        t.insert(lt, c.clone());
 
         t.fast_clear();
         assert!(t.is_empty());
@@ -3245,17 +3355,17 @@ mod tests {
         let d = make_rc_obj(4);
         let e = make_rc_obj(5);
         let f = make_rc_obj(6);
-        t.entry(&3).or_insert(c);
-        t.entry(&2).or_insert(b.clone());
-        t.entry(&1).or_insert(a);
+        t.entry(lt, &3).or_insert(c);
+        t.entry(lt, &2).or_insert(b.clone());
+        t.entry(lt, &1).or_insert(a);
 
-        match t.entry(&2) {
+        match t.entry(lt, &2) {
             Entry::Vacant(_) => unreachable!(),
             Entry::Occupied(c) => assert_eq!(c.get().unwrap().value, 2),
         }
-        assert_eq!(t.entry(&2).or_insert(b.clone()).get().unwrap().value, 2);
+        assert_eq!(t.entry(lt, &2).or_insert(b.clone()).get().unwrap().value, 2);
         assert_eq!(
-            t.entry(&2)
+            t.entry(lt, &2)
                 .or_insert_with(|| b.clone())
                 .get()
                 .unwrap()
@@ -3263,15 +3373,15 @@ mod tests {
             2
         );
 
-        match t.entry(&5) {
+        match t.entry(lt, &5) {
             Entry::Vacant(c) => assert_eq!(c.insert(e.clone()).get().unwrap().value, 5),
             Entry::Occupied(_) => unreachable!(),
         }
         assert!(e.link.is_linked());
-        assert_eq!(t.entry(&4).or_insert(d.clone()).get().unwrap().value, 4);
+        assert_eq!(t.entry(lt, &4).or_insert(d.clone()).get().unwrap().value, 4);
         assert!(d.link.is_linked());
         assert_eq!(
-            t.entry(&6)
+            t.entry(lt, &6)
                 .or_insert_with(|| f.clone())
                 .get()
                 .unwrap()
@@ -3303,8 +3413,8 @@ mod tests {
         };
         let b = a.clone();
         let mut l = RBTree::new(RcObjAdapter::new());
-        l.insert(&a);
-        l.insert(&b);
+        l.insert(lt, &a);
+        l.insert(lt, &b);
         assert_eq!(*l.front().get().unwrap().value, 5);
         assert_eq!(*l.back().get().unwrap().value, 5);
     }
@@ -3331,7 +3441,7 @@ mod tests {
                 value: 5,
             });
             let mut l = RBTree::new(RcObjAdapter::new());
-            l.insert(a.clone());
+            l.insert(lt, a.clone());
             assert_eq!(2, $ptr::strong_count(&a));
 
             let pointer = l.front().clone_pointer().unwrap();
