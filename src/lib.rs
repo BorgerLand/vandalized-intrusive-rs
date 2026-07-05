@@ -145,6 +145,10 @@
 //! `CursorMut` can be used to mutate the collection, but you may only use one
 //! of them at a time.
 //!
+//! Use `get` to access the current element by reference, or `get_ptr` to obtain
+//! the raw pointer for pointer identity or FFI interop. Both return `None` when
+//! the cursor is pointing at the null position.
+//!
 //! Cursors are a very powerful abstraction since they allow a collection to be
 //! mutated safely while it is being iterated on. For example, here is a
 //! function which removes all values within a given range from a `RBTree`:
@@ -309,7 +313,7 @@ pub use crate::unsafe_ref::UnsafeRef;
 pub use crate::xor_linked_list::AtomicLink as XorLinkedListAtomicLink;
 pub use crate::xor_linked_list::Link as XorLinkedListLink;
 pub use crate::xor_linked_list::XorLinkedList;
-pub use memoffset::offset_of;
+pub use core::mem::offset_of;
 
 /// An endpoint of a range of keys.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
